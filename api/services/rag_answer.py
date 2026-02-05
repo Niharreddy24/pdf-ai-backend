@@ -90,9 +90,11 @@ def answer_from_context(question: str, items: list[dict]):
         return "I couldn't find that in the PDF.", sources
 
     # ✅ CRITICAL FIX: never allow empty model
-    model = (os.getenv("OLLAMA_MODEL") or "").strip()
-    if not model:
-        model = "llama3.1:8b"  # fallback if env not loaded / empty
+    # ✅ Use tiny model by default (your server RAM is low)
+model = (os.getenv("OLLAMA_MODEL") or "").strip()
+if not model:
+    model = "tinyllama"
+
 
     system = (
         "You are a PDF question-answering assistant.\n"
