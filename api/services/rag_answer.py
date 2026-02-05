@@ -118,7 +118,7 @@ def answer_from_context(question: str, items):
             {"role": "system", "content": system},
             {"role": "user", "content": prompt},
         ],
-        options={""num_predict": 120,
+        options={"num_predict": 120,
     "temperature": 0.1,
     "num_ctx": 1024},
     )
