@@ -75,6 +75,7 @@ STATIC_URL = "static/"
 MEDIA_ROOT = os.getenv("MEDIA_ROOT", os.path.join(BASE_DIR, "media"))
 MEDIA_URL = "/media/"
 
+SECURE_CROSS_ORIGIN_OPENER_POLICY = None
 
 # Chroma local persistence
 CHROMA_DIR = BASE_DIR / "chroma_db"
