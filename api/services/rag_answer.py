@@ -40,7 +40,7 @@ def _important_tokens(question: str):
     return list(dict.fromkeys(tokens + extra))[:12]
 
 
-def _make_context(items, question: str, max_chars=2600):
+def _make_context(items, question: str, max_chars=900):
     tokens = _important_tokens(question)
 
     selected = []
