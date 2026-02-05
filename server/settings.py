@@ -1,6 +1,7 @@
 from pathlib import Path
 import os
 from dotenv import load_dotenv
+from pathlib import Path
 
 load_dotenv()
 
@@ -79,3 +80,5 @@ MEDIA_URL = "/media/"
 CHROMA_DIR = BASE_DIR / "chroma_db"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+STATIC_URL = "/static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
