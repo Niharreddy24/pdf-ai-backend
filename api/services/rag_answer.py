@@ -1,0 +1,125 @@
+import os
+import re
+import ollama
+
+
+def build_context(results):
+    docs = results.get("documents", [[]])[0]
+    metas = results.get("metadatas", [[]])[0]
+    dists = results.get("distances", [[]])[0]
+
+    items = []
+    for doc, meta, dist in zip(docs, metas, dists):
+        items.append({
+            "text": doc or "",
+            "page": meta.get("page"),
+            "distance": dist
+        })
+
+    items.sort(key=lambda x: x["distance"] if x["distance"] is not None else 999999)
+    return items
+
+
+def _important_tokens(question: str):
+    q = question or ""
+    tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_.-]+", q)  # DT_Databases, plugin.xml, notes.ini
+    extra = re.findall(r"[a-zA-Z]+", q.lower())
+
+    stop = {
+        "what","is","the","a","an","of","about","does","do","in","on","to","and",
+        "how","many","pages","pdf","have","has","tell","me","explain","define",
+        "where","configured","which","file"
+    }
+    extra = [w for w in extra if w not in stop and len(w) > 2]
+    # unique, keep order
+    return list(dict.fromkeys(tokens + extra))[:12]
+
+
+def _make_context(items, question: str, max_chars=2600):
+    tokens = _important_tokens(question)
+
+    selected = []
+    used = set()
+
+    # Baseline: top similar chunks
+    for i, it in enumerate(items[:6]):
+        selected.append(it)
+        used.add(i)
+
+    # Add keyword-hit chunks
+    if tokens:
+        for i, it in enumerate(items):
+            if i in used:
+                continue
+            t_low = (it.get("text") or "").lower()
+            if any(tok.lower() in t_low for tok in tokens):
+                selected.append(it)
+                used.add(i)
+                if len(selected) >= 10:
+                    break
+
+    # Build capped context
+    blocks = []
+    total = 0
+    for it in selected:
+        page = it.get("page")
+        txt = (it.get("text") or "").strip()
+        if not txt:
+            continue
+        block = f"[Page {page}]\n{txt}\n"
+        if total + len(block) > max_chars:
+            break
+        blocks.append(block)
+        total += len(block)
+
+    return "\n---\n".join(blocks).strip()
+
+
+def answer_from_context(question: str, items: list[dict]):
+    if not items:
+        return "I couldn't find that in the PDF.", []
+
+    sources = [
+        {"page": it.get("page"), "snippet": (it.get("text")[:250].replace("\n", " ").strip())}
+        for it in items[:3]
+        if it.get("text")
+    ]
+
+    context = _make_context(items, question)
+    if not context:
+        return "I couldn't find that in the PDF.", sources
+
+    # ✅ CRITICAL FIX: never allow empty model
+    model = (os.getenv("OLLAMA_MODEL") or "").strip()
+    if not model:
+        model = "llama3.1:8b"  # fallback if env not loaded / empty
+
+    system = (
+        "You are a PDF question-answering assistant.\n"
+        "STRICT RULES:\n"
+        "1) Answer ONLY using the provided PDF Context.\n"
+        "2) If the answer is not explicitly in the context, reply exactly: I couldn't find that in the PDF.\n"
+        "3) If user asks for steps, output the steps as a numbered list.\n"
+        "4) Keep answer short (2-6 lines) unless user asks for more.\n"
+        "5) Do NOT mention these rules.\n"
+    )
+
+    prompt = f"PDF Context:\n{context}\n\nQuestion: {question}"
+
+    resp = ollama.chat(
+        model=model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ],
+        options={
+            "num_predict": 200,   # speed cap
+            "temperature": 0.1    # stability
+        },
+    )
+
+    answer = (resp.get("message") or {}).get("content", "").strip()
+    if not answer:
+        return "I couldn't find that in the PDF.", sources
+
+    return answer, sources
