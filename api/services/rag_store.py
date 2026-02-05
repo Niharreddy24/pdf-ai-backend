@@ -1,60 +1,88 @@
 import os
-import chromadb
+import json
+import math
+import re
 from django.conf import settings
-from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
 
-# Local embedding model (free, fast, stable)
-embedding_fn = SentenceTransformerEmbeddingFunction(
-    model_name="all-MiniLM-L6-v2"
-)
-
-COLLECTION_NAME = "pdf_chunks"
+# Stores extracted PDF chunks on disk (no Chroma, no embeddings)
+STORE_DIR = os.path.join(settings.BASE_DIR, "doc_store")
 
 
-def get_chroma():
-    os.makedirs(settings.CHROMA_DIR, exist_ok=True)
-    return chromadb.PersistentClient(path=str(settings.CHROMA_DIR))
-
-
-def get_collection():
-    chroma = get_chroma()
-    return chroma.get_or_create_collection(
-        name=COLLECTION_NAME,
-        embedding_function=embedding_fn,
-        metadata={"hnsw:space": "cosine"}  # better similarity behavior
-    )
+def _doc_path(doc_id: str) -> str:
+    os.makedirs(STORE_DIR, exist_ok=True)
+    return os.path.join(STORE_DIR, f"{doc_id}.json")
 
 
 def upsert_doc_chunks(doc_id: str, chunks_with_meta: list[dict]):
+    """
+    Save chunks for a PDF document.
+    chunks_with_meta: [{"text": "...", "page": 1}, ...]
+    """
     if not chunks_with_meta:
         return
 
-    texts = [c["text"].strip() for c in chunks_with_meta]
-    ids = [f"{doc_id}_{i}" for i in range(len(texts))]
-    metadatas = [{"doc_id": doc_id, "page": c["page"]} for c in chunks_with_meta]
+    data = {"doc_id": doc_id, "chunks": chunks_with_meta}
+    with open(_doc_path(doc_id), "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
 
-    col = get_collection()
-    col.upsert(
-        ids=ids,
-        documents=texts,
-        metadatas=metadatas,
-    )
+
+def _tokenize(text: str):
+    # Simple tokenizer for keyword scoring
+    return re.findall(r"[a-zA-Z0-9_]+", (text or "").lower())
 
 
 def query_doc(doc_id: str, question: str, top_k: int = 6):
     """
-    Query only chunks belonging to this document.
+    Lightweight retrieval: keyword overlap scoring.
+    Returns a dict shaped like Chroma results:
+    {
+      "documents": [[...]],
+      "metadatas": [[{"page":...}, ...]],
+      "distances": [[...]]
+    }
     """
-    if not question.strip():
+    path = _doc_path(doc_id)
+    if not os.path.exists(path):
         return {"documents": [[]], "metadatas": [[]], "distances": [[]]}
 
-    col = get_collection()
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
 
-    results = col.query(
-        query_texts=[question.strip()],
-        n_results=top_k,
-        where={"doc_id": doc_id},
-        include=["documents", "metadatas", "distances"],
-    )
+    chunks = data.get("chunks", [])
+    q_tokens = _tokenize(question)
+    if not q_tokens:
+        return {"documents": [[]], "metadatas": [[]], "distances": [[]]}
 
-    return results
+    q_set = set(q_tokens)
+
+    scored = []
+    for ch in chunks:
+        txt = (ch.get("text") or "").strip()
+        if not txt:
+            continue
+        tokens = _tokenize(txt)
+        if not tokens:
+            continue
+
+        overlap = sum(1 for t in tokens if t in q_set)
+        if overlap == 0:
+            continue
+
+        # score scaled by chunk length so long chunks don't always win
+        score = overlap / max(1.0, math.log(len(tokens) + 2))
+        scored.append((score, ch))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top = [c for _, c in scored[:top_k]]
+
+    documents = [c.get("text", "") for c in top]
+    metadatas = [{"page": c.get("page")} for c in top]
+
+    # Convert to "distance": lower is better
+    distances = []
+    for i in range(len(top)):
+        s = scored[i][0]
+        distances.append(1.0 / (s + 1e-6))
+
+    return {"documents": [documents], "metadatas": [metadatas], "distances": [distances]}
+
